@@ -25,12 +25,24 @@ jobs:
 
     - name: Download Toolchain (AOSP Clang)
       run: |
+        # Clone the Google clang repo (shallow clone to save time)
+        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b master clang-repo
+        
+        # Create our toolchain directory
         mkdir -p toolchain
-        cd toolchain
-        # Downloading a stable AOSP Clang version
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
-        tar -xzf clang-r487747c.tar.gz
-        cd ..
+        
+        # Move the specific version content into toolchain
+        # We try to use a specific stable version (r487747c) if available, otherwise fallback to the latest
+        if [ -d "clang-repo/clang-r487747c" ]; then
+            mv clang-repo/clang-r487747c/* toolchain/
+        else
+            echo "Specific Clang version not found in master! Using the latest available version..."
+            LATEST_CLANG=$(ls -d clang-repo/clang-r* | sort -V | tail -n 1)
+            mv $LATEST_CLANG/* toolchain/
+        fi
+        
+        # Clean up
+        rm -rf clang-repo
 
     - name: Clone Your Kernel Source
       run: |
