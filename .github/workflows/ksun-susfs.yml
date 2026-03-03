@@ -1,0 +1,129 @@
+# ==========================================================
+  # JOB 2: Build the Kernel (With KernelSU-Next & SUSFS)
+  # ==========================================================
+  build-kernel:
+    name: 🏗️ Build Kernel
+    needs: prepare-toolchain
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    # We set environment variables here so you can easily change versions
+    env:
+      # Adjust this branch to match your M14's base kernel version (e.g., gki-android14-5.15)
+      SUSFS_BRANCH: "gki-android14-5.15"
+
+    steps:
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: MrPankaj24/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
+
+      # ── NEW STEP: Clone SUSFS ──
+      - name: 📥 Clone SUSFS4KSU
+        run: |
+          echo ">>> Cloning SUSFS ($SUSFS_BRANCH)..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b $SUSFS_BRANCH /tmp/susfs4ksu
+
+      - name: 🛡️ Patch KernelSU-Next
+        run: |
+          echo ">>> Injecting KernelSU-Next source..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
+
+      # ── NEW STEP: Inject & Patch SUSFS ──
+      - name: 🥷 Apply SUSFS Patches
+        run: |
+          echo ">>> Copying SUSFS core files to kernel tree..."
+          cp -rv /tmp/susfs4ksu/kernel_patches/fs/* fs/
+          cp -rv /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          echo ">>> Applying SUSFS core patch..."
+          # We use '|| true' so the build doesn't instantly crash if Samsung's source causes a minor patch conflict.
+          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch || true
+
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget bc bison flex libssl-dev libelf-dev python3 python-is-python3 \
+            make gcc gcc-aarch64-linux-gnu binutils binutils-aarch64-linux-gnu \
+            g++ cpio zip unzip lz4 zstd xz-utils libncurses-dev libncurses5-dev \
+            kmod rsync lld llvm clang dwarves pahole ccache device-tree-compiler \
+            zlib1g-dev libc6-dev-i386 cmake ninja-build
+
+      - name: 🔧 Restore Toolchains from Job 1
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang/host/linux-x86/clang-r450784d
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-clang-r450784d-kernel-build-tools-v3
+
+      - name: 🔍 Verify Toolchain
+        run: |
+          echo "=== Clang ==="
+          toolchain/clang/host/linux-x86/clang-r450784d/bin/clang --version
+
+      - name: 🔨 Build Kernel
+        run: |
+          set -e
+
+          # ── Set up toolchain PATHs ──
+          export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
+
+          export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export DEPMOD=depmod
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+
+          echo ">>> Generating base defconfig..."
+          make s5e8535-m14xnsxx_defconfig
+
+          echo ">>> Enabling KernelSU, SUSFS, and dependencies..."
+          scripts/config --enable CONFIG_KSU
+          scripts/config --enable CONFIG_KSU_SUSFS  # <-- SUSFS ENABLED HERE
+          scripts/config --enable CONFIG_KPROBES
+          scripts/config --enable CONFIG_HAVE_KPROBES
+          scripts/config --enable CONFIG_KPROBE_EVENTS
+          make olddefconfig
+
+          echo ">>> Building kernel with $(nproc) jobs..."
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+      - name: 📦 Collect Kernel Artifacts
+        if: success()
+        run: |
+          mkdir -p out/kernel
+          [ -f arch/arm64/boot/Image ] && cp arch/arm64/boot/Image out/kernel/
+          [ -f arch/arm64/boot/Image.gz ] && cp arch/arm64/boot/Image.gz out/kernel/
+          
+          if [ -d arch/arm64/boot/dts/exynos ]; then
+            mkdir -p out/dtbs
+            find arch/arm64/boot/dts/exynos -name "*.dtb" | grep -i "s5e8535\|m14" | xargs -I{} cp {} out/dtbs/ 2>/dev/null || true
+          fi
+
+      - name: ⬆️ Upload Kernel Image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-s5e8535-m14-ksu-susfs
+          path: out/
+          retention-days: 30
+
+      - name: ⬆️ Upload Build Log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failure
+          path: /tmp/kernel_build.log
+          retention-days: 7
