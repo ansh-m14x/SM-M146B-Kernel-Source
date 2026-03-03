@@ -1,0 +1,253 @@
+name: 🏗️ Build Kernel (s5e8535 / M14 with KernelSU-Next)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: 🏗️ Build Kernel (s5e8535 / M14)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      # ──────────────────────────────────────────────
+      # 1. Checkout kernel source
+      # ──────────────────────────────────────────────
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: MrPankaj24/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
+
+      # ──────────────────────────────────────────────
+      # 1.5. Patch KernelSU-Next
+      # ──────────────────────────────────────────────
+      - name: 🛡️ Patch KernelSU-Next
+        run: |
+          echo ">>> Injecting KernelSU-Next source..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
+          echo "✅ KernelSU-Next (Stable) integrated successfully!"
+
+      # ──────────────────────────────────────────────
+      # 2. Install dependencies
+      # ──────────────────────────────────────────────
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget \
+            bc bison flex \
+            libssl-dev libelf-dev \
+            python3 python-is-python3 \
+            make gcc gcc-aarch64-linux-gnu \
+            binutils binutils-aarch64-linux-gnu \
+            g++ cpio zip unzip \
+            lz4 zstd xz-utils \
+            libncurses-dev libncurses5-dev \
+            kmod rsync \
+            lld llvm clang \
+            dwarves pahole \
+            ccache \
+            device-tree-compiler \
+            zlib1g-dev libc6-dev-i386 \
+            cmake ninja-build
+
+      # ──────────────────────────────────────────────
+      # 3. Cache toolchains to speed up re-runs
+      # ──────────────────────────────────────────────
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang/host/linux-x86/clang-r450784d
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-clang-r450784d-kernel-build-tools-v3
+
+      # ──────────────────────────────────────────────
+      # 4. Download Clang (only if not cached)
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Clang r450784d
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d
+
+          echo "Downloading Clang r450784d from AOSP..."
+          curl -L \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz" \
+            -o /tmp/clang.tar.gz
+
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d
+          rm /tmp/clang.tar.gz
+
+          echo "✅ Clang version:"
+          toolchain/clang/host/linux-x86/clang-r450784d/bin/clang --version
+
+      # ──────────────────────────────────────────────
+      # 5. Download Kernel Build Tools (only if not cached)
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Cloning kernel/prebuilts/build-tools..."
+          git clone --depth=1 -b main \
+            https://android.googlesource.com/kernel/prebuilts/build-tools \
+            toolchain/build/kernel/build-tools
+
+          # Create symlinks that the build expects
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 \
+            toolchain/build/kernel/build-tools/path/linux-x86
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl \
+            toolchain/build/kernel/build-tools/sysroot
+
+          echo "✅ Build tools downloaded"
+
+      # ──────────────────────────────────────────────
+      # 6. Download Kernel Prebuilt Tools (only if not cached)
+      # ──────────────────────────────────────────────
+      - name: ⬇️ Download Kernel Prebuilt Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Cloning kernel/prebuilts/build-tools for pahole/BTF support..."
+          git clone --depth=1 \
+            https://android.googlesource.com/kernel/prebuilts/build-tools \
+            toolchain/prebuilts/kernel-build-tools
+
+          echo "✅ Kernel prebuilt tools downloaded"
+
+      # ──────────────────────────────────────────────
+      # 7. Verify toolchain
+      # ──────────────────────────────────────────────
+      - name: 🔍 Verify Toolchain
+        run: |
+          echo "=== Clang ==="
+          toolchain/clang/host/linux-x86/clang-r450784d/bin/clang --version
+
+          echo "=== System Cross GCC (fallback) ==="
+          aarch64-linux-gnu-gcc --version || echo "Not available"
+
+          echo "=== pahole ==="
+          pahole --version
+
+          echo "=== Python ==="
+          python3 --version
+
+          echo "=== Make ==="
+          make --version | head -1
+
+          echo "=== Available defconfigs for device ==="
+          ls arch/arm64/configs/ | grep -i "s5e\|m14\|8535"
+
+      # ──────────────────────────────────────────────
+      # 8. Build the Kernel (Modified for KernelSU)
+      # ──────────────────────────────────────────────
+      - name: 🔨 Build Kernel
+        run: |
+          set -e
+
+          # ── Set up toolchain PATHs ──
+          export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
+
+          # ── Host build flags (use system glibc, not musl sysroot) ──
+          export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
+            -fuse-ld=lld --rtlib=compiler-rt"
+
+          # ── Kernel build environment ──
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export DEPMOD=depmod
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+
+          echo "PLATFORM_VERSION = $PLATFORM_VERSION"
+          echo "ANDROID_MAJOR_VERSION = $ANDROID_MAJOR_VERSION"
+          echo "ARCH = $ARCH"
+
+          # ── Step 1: Generate .config from defconfig ──
+          echo ">>> Generating base defconfig..."
+          make s5e8535-m14xnsxx_defconfig
+
+          # ── Step 2: Inject KernelSU-Next Configuration ──
+          echo ">>> Enabling KernelSU and KPROBES dependencies..."
+          scripts/config --enable CONFIG_KSU
+          scripts/config --enable CONFIG_KPROBES
+          scripts/config --enable CONFIG_HAVE_KPROBES
+          scripts/config --enable CONFIG_KPROBE_EVENTS
+          make olddefconfig
+
+          # ── Step 3: Disable CONFIG_DEBUG_INFO_BTF if pahole is too old ──
+          PAHOLE_VER=$(pahole --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1)
+          echo "pahole version: $PAHOLE_VER"
+
+          # ── Step 4: Build kernel ──
+          echo ">>> Building kernel with $(nproc) jobs..."
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+          echo "✅ Build completed!"
+
+      # ──────────────────────────────────────────────
+      # 9. Collect build artifacts
+      # ──────────────────────────────────────────────
+      - name: 📦 Collect Kernel Artifacts
+        if: success()
+        run: |
+          mkdir -p out/kernel
+
+          # Copy the kernel image
+          if [ -f arch/arm64/boot/Image ]; then
+            cp arch/arm64/boot/Image out/kernel/
+            echo "✅ Copied Image"
+          fi
+
+          if [ -f arch/arm64/boot/Image.gz ]; then
+            cp arch/arm64/boot/Image.gz out/kernel/
+            echo "✅ Copied Image.gz"
+          fi
+
+          # Copy device tree blobs
+          if [ -d arch/arm64/boot/dts/exynos ]; then
+            mkdir -p out/dtbs
+            find arch/arm64/boot/dts/exynos -name "*.dtb" | grep -i "s5e8535\|m14" | \
+              xargs -I{} cp {} out/dtbs/ 2>/dev/null || true
+            echo "✅ Copied DTBs"
+          fi
+
+          echo "=== Build output ==="
+          ls -lh out/kernel/ 2>/dev/null || echo "No artifacts found"
+          ls -lh out/dtbs/ 2>/dev/null || echo "No DTBs found"
+
+      # ──────────────────────────────────────────────
+      # 10. Upload artifacts
+      # ──────────────────────────────────────────────
+      - name: ⬆️ Upload Kernel Image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-s5e8535-m14-kernelsu-next
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ──────────────────────────────────────────────
+      # 11. Upload build log on failure for debugging
+      # ──────────────────────────────────────────────
+      - name: ⬆️ Upload Build Log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-failure
+          path: /tmp/kernel_build.log
+          if-no-files-found: ignore
+          retention-days: 7
