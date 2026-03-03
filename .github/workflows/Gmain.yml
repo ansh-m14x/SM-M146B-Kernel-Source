@@ -1,0 +1,76 @@
+name: Build stock Custom Kernel for SM-M146B (m14x)
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-24.04 # Matches your environment
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            python3 python-is-python3 make gcc binutils cpio rsync \
+            lz4 zstd kmod dwarves lld llvm clang [cite: 1, 8, 17, 21]
+
+      - name: Setup Toolchain Directories
+        run: |
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d [cite: 10]
+          mkdir -p toolchain/build/kernel [cite: 8]
+          mkdir -p toolchain/prebuilts 
+
+      - name: Download and Extract Clang (r450784d)
+        run: |
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz -O /tmp/clang.tar.gz 
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d [cite: 10]
+
+      - name: Clone AOSP Build Tools
+        run: |
+          git clone --depth=1 -b main https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/build/kernel/build-tools [cite: 12]
+          git clone --depth=1 -b android13-release https://android.googlesource.com/platform/prebuilts/kernel-build-tools toolchain/prebuilts/kernel-build-tools [cite: 16]
+
+      - name: Apply Path and Sysroot Fixes
+        run: |
+          mkdir -p toolchain/build/kernel/build-tools/path 
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 toolchain/build/kernel/build-tools/path/linux-x86 
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl toolchain/build/kernel/build-tools/sysroot 
+
+      - name: Compile Kernel
+        env:
+          [cite_start]DTC_FLAGS: "-@" [cite: 20]
+          [cite_start]PLATFORM_VERSION: 15 [cite: 20]
+          [cite_start]ANDROID_MAJOR_VERSION: v [cite: 20]
+          [cite_start]LLVM: 1 [cite: 20]
+          [cite_start]DEPMOD: depmod [cite: 20]
+          [cite_start]ARCH: arm64 [cite: 20]
+          [cite_start]TARGET_SOC: s5e8535 [cite: 20]
+        run: |
+          # Set Paths
+          export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH 
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH 
+
+          # Configure Host Compiler Flags to use system glibc 
+          [cite_start]export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include" [cite: 20]
+          [cite_start]export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt" [cite: 20]
+
+          # Build
+          [cite_start]make s5e8535-m14xnsxx_defconfig [cite: 20]
+          [cite_start]make -j$(nproc) [cite: 20]
+
+      - name: Upload Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/dts/
