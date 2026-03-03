@@ -1,46 +1,35 @@
-# ==========================================================
-  # JOB 2: Build the Kernel (With KernelSU-Next & SUSFS)
-  # ==========================================================
+name: 🏗️ Build Kernel (KSU-Next + SUSFS)
+
+# ──────────────────────────────────────────────
+# 1. Triggers (Why it wasn't showing up!)
+# ──────────────────────────────────────────────
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # <--- This is what gives you the "Run workflow" button in the Actions tab
+
+jobs:
   build-kernel:
-    name: 🏗️ Build Kernel
-    needs: prepare-toolchain
+    name: 🏗️ Build s5e8535 / M14
     runs-on: ubuntu-22.04
     timeout-minutes: 120
 
-    # We set environment variables here so you can easily change versions
     env:
-      # Adjust this branch to match your M14's base kernel version (e.g., gki-android14-5.15)
+      # We set this globally so all steps can read it
       SUSFS_BRANCH: "gki-android14-5.15"
 
     steps:
+      # ──────────────────────────────────────────────
+      # 2. Preparation & Checkout
+      # ──────────────────────────────────────────────
       - name: 📥 Checkout Kernel Source
         uses: actions/checkout@v4
         with:
           repository: MrPankaj24/SM-M146B-Kernel-Source
           ref: main
           fetch-depth: 1
-
-      # ── NEW STEP: Clone SUSFS ──
-      - name: 📥 Clone SUSFS4KSU
-        run: |
-          echo ">>> Cloning SUSFS ($SUSFS_BRANCH)..."
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b $SUSFS_BRANCH /tmp/susfs4ksu
-
-      - name: 🛡️ Patch KernelSU-Next
-        run: |
-          echo ">>> Injecting KernelSU-Next source..."
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
-
-      # ── NEW STEP: Inject & Patch SUSFS ──
-      - name: 🥷 Apply SUSFS Patches
-        run: |
-          echo ">>> Copying SUSFS core files to kernel tree..."
-          cp -rv /tmp/susfs4ksu/kernel_patches/fs/* fs/
-          cp -rv /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
-          
-          echo ">>> Applying SUSFS core patch..."
-          # We use '|| true' so the build doesn't instantly crash if Samsung's source causes a minor patch conflict.
-          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch || true
 
       - name: 📦 Install Build Dependencies
         run: |
@@ -52,31 +41,74 @@
             kmod rsync lld llvm clang dwarves pahole ccache device-tree-compiler \
             zlib1g-dev libc6-dev-i386 cmake ninja-build
 
-      - name: 🔧 Restore Toolchains from Job 1
+      # ──────────────────────────────────────────────
+      # 3. Download & Setup Toolchain
+      # ──────────────────────────────────────────────
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
         uses: actions/cache@v4
         with:
           path: |
             toolchain/clang/host/linux-x86/clang-r450784d
             toolchain/build/kernel/build-tools
             toolchain/prebuilts/kernel-build-tools
-          key: toolchain-clang-r450784d-kernel-build-tools-v3
+          key: toolchain-clang-r450784d-v1
 
-      - name: 🔍 Verify Toolchain
+      - name: ⬇️ Download Clang r450784d (AOSP)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          echo "=== Clang ==="
-          toolchain/clang/host/linux-x86/clang-r450784d/bin/clang --version
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d
+          echo "Downloading Clang r450784d..."
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d
+          rm /tmp/clang.tar.gz
 
-      - name: 🔨 Build Kernel
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 -b main https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/build/kernel/build-tools
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 toolchain/build/kernel/build-tools/path/linux-x86
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl toolchain/build/kernel/build-tools/sysroot
+
+      - name: ⬇️ Download Prebuilt Tools (for pahole)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/prebuilts/kernel-build-tools
+
+      # ──────────────────────────────────────────────
+      # 4. Inject Modifications (KSU & SUSFS)
+      # ──────────────────────────────────────────────
+      - name: 🛡️ Patch KernelSU-Next
+        run: |
+          echo ">>> Injecting KernelSU-Next..."
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
+
+      - name: 🥷 Apply SUSFS Patches
+        run: |
+          echo ">>> Cloning SUSFS ($SUSFS_BRANCH)..."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b $SUSFS_BRANCH /tmp/susfs4ksu
+          
+          echo ">>> Copying SUSFS files to fs/ and include/linux/..."
+          cp -rv /tmp/susfs4ksu/kernel_patches/fs/* fs/
+          cp -rv /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          echo ">>> Applying SUSFS core patch to kernel source..."
+          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch || true
+
+      # ──────────────────────────────────────────────
+      # 5. Build The Kernel
+      # ──────────────────────────────────────────────
+      - name: 🔨 Compile Kernel
         run: |
           set -e
 
-          # ── Set up toolchain PATHs ──
+          # ── Set up Paths & Flags ──
           export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
           export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
 
           export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
-          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
-            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
 
           export DTC_FLAGS="-@"
           export PLATFORM_VERSION=15
@@ -86,21 +118,33 @@
           export ARCH=arm64
           export TARGET_SOC=s5e8535
 
-          echo ">>> Generating base defconfig..."
+          echo ">>> 1. Generating Base Config..."
           make s5e8535-m14xnsxx_defconfig
 
-          echo ">>> Enabling KernelSU, SUSFS, and dependencies..."
+          echo ">>> 2. Enabling KSU, SUSFS, and Mountify..."
+          # Core Root Features
           scripts/config --enable CONFIG_KSU
-          scripts/config --enable CONFIG_KSU_SUSFS  # <-- SUSFS ENABLED HERE
+          scripts/config --enable CONFIG_KSU_SUSFS
+          
+          # Mountify Requirements
+          scripts/config --enable CONFIG_TMPFS_XATTR
+          scripts/config --enable CONFIG_TMPFS_POSIX_ACL
+          
+          # KSU Dependencies
           scripts/config --enable CONFIG_KPROBES
           scripts/config --enable CONFIG_HAVE_KPROBES
           scripts/config --enable CONFIG_KPROBE_EVENTS
+          
+          # Apply the new configs cleanly
           make olddefconfig
 
-          echo ">>> Building kernel with $(nproc) jobs..."
+          echo ">>> 3. Compiling (Using $(nproc) threads)..."
           make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
 
-      - name: 📦 Collect Kernel Artifacts
+      # ──────────────────────────────────────────────
+      # 6. Collect & Upload
+      # ──────────────────────────────────────────────
+      - name: 📦 Collect Artifacts
         if: success()
         run: |
           mkdir -p out/kernel
@@ -112,15 +156,15 @@
             find arch/arm64/boot/dts/exynos -name "*.dtb" | grep -i "s5e8535\|m14" | xargs -I{} cp {} out/dtbs/ 2>/dev/null || true
           fi
 
-      - name: ⬆️ Upload Kernel Image
+      - name: ⬆️ Upload Final Kernel
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-s5e8535-m14-ksu-susfs
+          name: kernel-s5e8535-ksu-susfs
           path: out/
           retention-days: 30
 
-      - name: ⬆️ Upload Build Log (on failure)
+      - name: ⬆️ Upload Build Log (On Failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
