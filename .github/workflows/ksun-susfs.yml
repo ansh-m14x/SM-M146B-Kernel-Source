@@ -84,7 +84,7 @@ jobs:
           echo ">>> Injecting KernelSU-Next..."
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s stable
 
-      - name: 🥷 Apply SUSFS Patches
+      - name: 🥷 Apply SUSFS & Samsung Rejection Patches
         run: |
           echo ">>> Cloning SUSFS ($SUSFS_BRANCH)..."
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b $SUSFS_BRANCH /tmp/susfs4ksu
@@ -93,9 +93,20 @@ jobs:
           cp -rv /tmp/susfs4ksu/kernel_patches/fs/* fs/
           cp -rv /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
           
-          echo ">>> Applying SUSFS core patch to kernel source..."
+          echo ">>> Applying standard SUSFS core patch..."
           patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_${SUSFS_BRANCH}.patch || true
 
+          echo ">>> Downloading WildKernels Samsung Fixes..."
+          git clone https://github.com/WildKernels/kernel_patches.git /tmp/kernel_patches
+          
+          echo ">>> Applying Exynos Compatibility Patches (A54 -> M14)..."
+          # We pull the A546B patches because the Exynos 1380 layout is extremely similar to your 1330
+          cp /tmp/kernel_patches/samsung/SM-A546B-Oneui7/* ./
+          
+          # Force apply the rejection fixes to connect the SUSFS hooks!
+          patch -p1 < fix_namespace.patch || true
+          patch -p1 < fix_base.patch || true
+          patch -p1 < fix_exec.patch || true
       # ──────────────────────────────────────────────
       # 5. Build The Kernel
       # ──────────────────────────────────────────────
@@ -125,6 +136,9 @@ jobs:
           # Core Root Features
           scripts/config --enable CONFIG_KSU
           scripts/config --enable CONFIG_KSU_SUSFS
+
+          # --- Enable Stealth Inline Hooking ---
+          scripts/config --enable CONFIG_KSU_INLINE_HOOK
           
           # Mountify Requirements
           scripts/config --enable CONFIG_TMPFS_XATTR
