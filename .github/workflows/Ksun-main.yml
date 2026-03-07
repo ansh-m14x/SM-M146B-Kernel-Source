@@ -145,22 +145,21 @@ jobs:
           echo "=== Available defconfigs for device ==="
           ls arch/arm64/configs/ | grep -i "s5e\|m14\|8535"
 
+# ──────────────────────────────────────────────
+      # 8. Compile the Kernel (KernelSU-Next Only)
       # ──────────────────────────────────────────────
-      # 8. Build the Kernel (Modified for KernelSU)
-      # ──────────────────────────────────────────────
-      - name: 🔨 Build Kernel
+      - name: 🔨 Compile Kernel
         run: |
           set -e
+          set -o pipefail
 
           # ── Set up toolchain PATHs ──
           export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
           export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
-
-          # ── Host build flags (use system glibc, not musl sysroot) ──
+          
+          # ── Host build flags ──
           export HOSTCFLAGS="-I$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/include"
-          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
-            -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 \
-            -fuse-ld=lld --rtlib=compiler-rt"
+          export HOSTLDFLAGS="-Wl,-rpath,$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -L$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/lib64 -fuse-ld=lld --rtlib=compiler-rt"
 
           # ── Kernel build environment ──
           export DTC_FLAGS="-@"
@@ -171,32 +170,32 @@ jobs:
           export ARCH=arm64
           export TARGET_SOC=s5e8535
 
-          echo "PLATFORM_VERSION = $PLATFORM_VERSION"
-          echo "ANDROID_MAJOR_VERSION = $ANDROID_MAJOR_VERSION"
-          echo "ARCH = $ARCH"
-
-          # ── Step 1: Generate .config from defconfig ──
-          echo ">>> Generating base defconfig..."
+          echo ">>> Generating Base Config..."
           make s5e8535-m14xnsxx_defconfig
 
-          # ── Step 2: Inject KernelSU-Next Configuration ──
-          echo ">>> Enabling KernelSU and KPROBES dependencies..."
-          scripts/config --enable CONFIG_KSU
-          scripts/config --enable CONFIG_KPROBES
-          scripts/config --enable CONFIG_HAVE_KPROBES
-          scripts/config --enable CONFIG_KPROBE_EVENTS
+          echo ">>> Injecting KernelSU-Next config..."
+          cat >> .config << 'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          EOF
+
+          # Clean up any accidental leading spaces from the EOF injection
+          sed -i 's/^[[:space:]]*//' .config
+
+          echo ">>> Applying new configuration..."
           make olddefconfig
 
-          # ── Step 3: Disable CONFIG_DEBUG_INFO_BTF if pahole is too old ──
+          echo ">>> Config verification:"
+          grep -E "CONFIG_KSU" .config || true
+
+          # ── Disable CONFIG_DEBUG_INFO_BTF if pahole is too old ──
           PAHOLE_VER=$(pahole --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+' | head -1)
           echo "pahole version: $PAHOLE_VER"
 
-          # ── Step 4: Build kernel ──
-          echo ">>> Building kernel with $(nproc) jobs..."
+          echo ">>> Compiling ($(nproc) threads)..."
           make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
 
           echo "✅ Build completed!"
-
       # ──────────────────────────────────────────────
       # 9. Collect build artifacts
       # ──────────────────────────────────────────────
