@@ -1,0 +1,203 @@
+name: 🏗️ Build Kernel (CLD ReSukiSU + Custom + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    name: 🏗️ Build s5e8535 / M14
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    env:
+      SUSFS_BRANCH: "gki-android13-5.15"
+      SUSFS_URL: "https://gitlab.com/simonpunk/susfs4ksu.git"
+      CUSTOM_PATCH_URL: "https://raw.githubusercontent.com/MrPankaj24/susfs-SM-M146B/main/50_add_susfs_in_gki-android13-5.15.patch"
+      CUSTOM_FRAG_URL: "https://raw.githubusercontent.com/MrPankaj24/susfs-SM-M146B/main/defconfig.fragment"
+
+    steps:
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: MrPankaj24/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
+
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget bc bison flex libssl-dev libelf-dev python3 python-is-python3 \
+            make gcc gcc-aarch64-linux-gnu binutils binutils-aarch64-linux-gnu \
+            g++ cpio zip unzip lz4 zstd xz-utils libncurses-dev libncurses5-dev \
+            kmod rsync lld llvm clang dwarves pahole ccache device-tree-compiler \
+            zlib1g-dev libc6-dev-i386 cmake ninja-build
+
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang/host/linux-x86/clang-r450784d
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-clang-r450784d-v1
+
+      - name: ⬇️ Download Clang r450784d (AOSP)
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d
+          rm -f /tmp/clang.tar.gz
+
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 -b main https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/build/kernel/build-tools
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf "$(pwd)/toolchain/build/kernel/build-tools/linux-x86" toolchain/build/kernel/build-tools/path/linux-x86
+          ln -sf "$(pwd)/toolchain/build/kernel/build-tools/sysroots/x86_64-unknown-linux-musl" toolchain/build/kernel/build-tools/sysroot
+
+      - name: ⬇️ Download Prebuilt Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/prebuilts/kernel-build-tools
+
+      - name: 🥷 Clone SUSFS Repo
+        run: |
+          set -e
+          rm -rf /tmp/susfs4ksu
+          git clone --depth=1 --single-branch --branch "${SUSFS_BRANCH}" "${SUSFS_URL}" /tmp/susfs4ksu
+
+      - name: ⬇️ Download Custom SUSFS Patch & Fragment
+        run: |
+          curl -LSs "${CUSTOM_PATCH_URL}" -o /tmp/custom_susfs.patch
+          curl -LSs "${CUSTOM_FRAG_URL}" -o /tmp/defconfig.fragment
+
+      - name: 🛡️ Inject ReSukiSU
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: 📁 Copy SUSFS Core Files
+        run: |
+          set -euo pipefail
+          cp -r /tmp/susfs4ksu/kernel_patches/fs/* fs/
+          cp -r /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+      - name: 🥷 Apply SUSFS Patch
+        run: |
+          set -e
+          patch -p1 -l < /tmp/custom_susfs.patch || true
+
+      - name: 🔧 Add Missing SUSFS Function Stubs
+        run: |
+          set -e
+          cat >> fs/susfs.c <<'EOF'
+
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+          #include <linux/mount.h>
+          #include "mount.h"
+          struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *mnt) { return mnt; }
+          struct mount *susfs_get_non_sus_mnt_from_mnt(struct mount *mnt) { return mnt; }
+          #endif
+          EOF
+
+          cat >> include/linux/susfs.h <<'EOF'
+
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+          struct vfsmount;
+          struct mount;
+          struct vfsmount *susfs_get_non_sus_vfsmnt_from_vfsmnt(struct vfsmount *mnt);
+          struct mount *susfs_get_non_sus_mnt_from_mnt(struct mount *mnt);
+          #endif
+          EOF
+
+          echo ">>> Stubs added:"
+          grep -n 'susfs_get_non_sus' fs/susfs.c | tail -3
+          
+
+      - name: 🔨 Compile Kernel
+        run: |
+          set -e
+          export PATH="$(pwd)/toolchain/prebuilts/kernel-build-tools/linux-x86/bin:$PATH"
+          export PATH="$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH"
+          export PATH="$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH"
+
+                    # ── Kernel build environment ──
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+
+          make s5e8535-m14xnsxx_defconfig
+
+          cat >> .config <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_THREAD_INFO_IN_TASK=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          # CONFIG_KSU_SUSFS_SUS_MOUNT is not set
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_UNICODE_FILTER=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=n
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=n
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          # CONFIG_DEBUG_INFO_BTF is not set
+          EOF
+
+          # Clean up any leading spaces created by YAML
+          sed -i 's/^[ \t]*//' .config
+          
+          make olddefconfig
+          # Hard disable BTF again after olddefconfig
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' .config
+          echo "# CONFIG_DEBUG_INFO_BTF is not set" >> .config
+
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+      - name: 📦 Package with AnyKernel3
+        if: success()
+        run: |
+          set -e
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/AnyKernel3
+          rm -rf /tmp/AnyKernel3/.git
+          
+          # Use your specific DTB paths
+          cp arch/arm64/boot/Image /tmp/AnyKernel3/
+          cp arch/arm64/boot/dts/samsung/m14x/*.dtb /tmp/AnyKernel3/ 2>/dev/null || true
+          
+          # Simple anykernel script
+          cat > /tmp/AnyKernel3/anykernel.sh <<'EOF'
+          block=/dev/block/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+          
+          cd /tmp/AnyKernel3
+          mkdir -p "${GITHUB_WORKSPACE}/out"
+          zip -r9 "${GITHUB_WORKSPACE}/out/M14-Kernel.zip" *
+
+      - name: ⬆️ Upload
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: M14-Kernel-Zip
+          path: out/M14-Kernel.zip
