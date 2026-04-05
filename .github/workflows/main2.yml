@@ -20,7 +20,7 @@ jobs:
       - name: 📥 Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: MrPankaj24/SM-M146B-Kernel-Source
+          repository: ansh-m14x/SM-M146B-Kernel-Source
           ref: main
           fetch-depth: 1
 
