@@ -1,75 +1,119 @@
-name: 🏗️ M14 5G Kernel (KSU + SUSFS)
+name: 🏗️ Build Kernel (KSU + SUSFS + AnyKernel3)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: 🏗️ Build Kernel (s5e8535 / M14)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
     steps:
-    - name: Checkout Source
-      uses: actions/checkout@v4
-      with:
-        repository: ansh-m14x/SM-M146B-Kernel-Source # YOUR REPO
-        path: android_kernel
+      - name: 📥 Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: ansh-m14x/SM-M146B-Kernel-Source
+          ref: main
+          fetch-depth: 1
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y git build-essential bc bison flex libssl-dev libncurses5-dev zip curl python3 rsync
+      - name: 📦 Install Build Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            git curl wget bc bison flex libssl-dev libelf-dev \
+            python3 python-is-python3 make gcc gcc-aarch64-linux-gnu \
+            binutils binutils-aarch64-linux-gnu g++ cpio zip unzip \
+            lz4 zstd xz-utils libncurses-dev libncurses5-dev \
+            kmod rsync lld llvm clang dwarves pahole ccache \
+            device-tree-compiler zlib1g-dev libc6-dev-i386 cmake ninja-build
 
-    - name: Setup Proton Clang
-      run: |
-        git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
+      - name: 🔧 Cache Toolchains
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchain/clang/host/linux-x86/clang-r450784d
+            toolchain/build/kernel/build-tools
+            toolchain/prebuilts/kernel-build-tools
+          key: toolchain-clang-r450784d-kernel-build-tools-v3
 
-    - name: Clone KSU & SUSFS
-      run: |
-        # Using the Android 14/15 compatible SUSFS branch
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
-        git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+      - name: ⬇️ Download Clang r450784d
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/clang/host/linux-x86/clang-r450784d
+          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz" -o /tmp/clang.tar.gz
+          tar -xzf /tmp/clang.tar.gz -C toolchain/clang/host/linux-x86/clang-r450784d
+          rm /tmp/clang.tar.gz
 
-    - name: Setup KernelSU
-      working-directory: android_kernel
-      run: |
-        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+      - name: ⬇️ Download Kernel Build Tools
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 -b main https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/build/kernel/build-tools
+          mkdir -p toolchain/build/kernel/build-tools/path
+          ln -sf $(pwd)/toolchain/build/kernel/build-tools/linux-x86 toolchain/build/kernel/build-tools/path/linux-x86
+          git clone --depth=1 https://android.googlesource.com/kernel/prebuilts/build-tools toolchain/prebuilts/kernel-build-tools
 
-    - name: Patch SUSFS
-      working-directory: android_kernel
-      run: |
-        # 1. Copy SUSFS headers
-        cp ../susfs4ksu/kernel_patches/include/linux/*.h ./include/linux/
-        cp ../susfs4ksu/kernel_patches/fs/* ./fs/
-        
-        # 2. Apply SUSFS Patches (Note: We use 6.1 for Android 15/A14 logic)
-        # If your kernel version is different, we adjust this patch file name
-        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./
-        patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || echo "Patch ignored - manual merge might be needed"
+      # ── NEW: Setup KSU & SUSFS ──
+      - name: 📥 Setup KernelSU & SUSFS
+        run: |
+          # Setup KernelSU
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+          # Clone SUSFS Patches
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
+          # Clone AnyKernel3 for packaging
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-    - name: Build Kernel
-      working-directory: android_kernel
-      run: |
-        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
-        export ARCH=arm64
-        export KBUILD_BUILD_USER="Ansh"
-        export KBUILD_BUILD_HOST="M14-KSU"
-        
-        # Build commands
-        make O=out LLVM=1 LLVM_IAS=1 s5e8535-m14xnsxx_defconfig
-        
-        # Enable KSU & SUSFS manually in config
-        scripts/config --file out/.config --enable CONFIG_KSU
-        scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-        
-        make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 Image
+      - name: 🛠️ Patch SUSFS
+        run: |
+          # Copy headers
+          cp susfs4ksu/kernel_patches/include/linux/*.h include/linux/
+          cp susfs4ksu/kernel_patches/fs/* fs/
+          # Apply Patches
+          patch -p1 < susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch || echo "Patch conflict ignored"
+          cp susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch KernelSU/
+          cd KernelSU && patch -p1 < 10_enable_susfs_for_ksu.patch || echo "KSU patch ignored"
 
-    - name: Package AnyKernel3
-      run: |
-        cp android_kernel/out/arch/arm64/boot/Image AnyKernel3/
-        cd AnyKernel3
-        zip -r9 "../Ansh-M14-KSU-SUSFS.zip" *
+      - name: 🔨 Build Kernel
+        run: |
+          set -e
+          export PATH=$(pwd)/toolchain/clang/host/linux-x86/clang-r450784d/bin:$PATH
+          export PATH=$(pwd)/toolchain/build/kernel/build-tools/path/linux-x86/:$PATH
+          
+          # Personlization
+          export KBUILD_BUILD_USER="Ansh"
+          export KBUILD_BUILD_HOST="M14-KSU"
 
-    - name: Upload
-      uses: actions/upload-artifact@v4
-      with:
-        name: Ansh-M14-KernelSU
-        path: Ansh-M14-KSU-SUSFS.zip
+          export DTC_FLAGS="-@"
+          export PLATFORM_VERSION=15
+          export ANDROID_MAJOR_VERSION=v
+          export LLVM=1
+          export ARCH=arm64
+          export TARGET_SOC=s5e8535
+
+          make s5e8535-m14xnsxx_defconfig
+          
+          # Enable KSU & SUSFS in .config
+          scripts/config --enable CONFIG_KSU
+          scripts/config --enable CONFIG_KSU_SUSFS
+
+          make -j$(nproc) 2>&1 | tee /tmp/kernel_build.log
+
+      - name: 📦 Package with AnyKernel3
+        if: success()
+        run: |
+          mkdir -p out/kernel out/dtbs
+          cp arch/arm64/boot/Image AnyKernel3/
+          # Collect DTBs
+          find arch/arm64/boot/dts/ -name "*.dtb" -exec cp {} out/dtbs/ \;
+          mkdir -p AnyKernel3/dtb
+          cp out/dtbs/*.dtb AnyKernel3/dtb/ || true
+          cd AnyKernel3
+          zip -r9 ../Ansh-M14-KSU-SUSFS.zip *
+
+      - name: ⬆️ Upload Flashable Zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ansh-M14-KSU-SUSFS
+          path: Ansh-M14-KSU-SUSFS.zip
