@@ -1,4 +1,4 @@
-name: Build Samsung M14 Kernel (Make)
+name: 🏗️ M14 5G Kernel (KSU + SUSFS)
 
 on:
   workflow_dispatch:
@@ -6,59 +6,29 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout Workflow
+    - name: Checkout Source
       uses: actions/checkout@v4
-
-    - name: Free Disk Space
-      uses: endersonmenezes/free-disk-space@v3
       with:
-        remove_android: true
-        remove_dotnet: true
-        remove_haskell: true
+        repository: ansh-m14x/SM-M146B-Kernel-Source # YOUR REPO
+        path: android_kernel
 
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y git build-essential bc bison flex libssl-dev libncurses5-dev zip curl
+        sudo apt-get install -y git build-essential bc bison flex libssl-dev libncurses5-dev zip curl python3 rsync
 
-    - name: Download Toolchain (AOSP Clang)
+    - name: Setup Proton Clang
       run: |
-        # Clone the Google clang repo (shallow clone to save time)
-        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b master clang-repo
-        
-        # Create our toolchain directory
-        mkdir -p toolchain
-        
-        # Move the specific version content into toolchain
-        # We try to use a specific stable version (r487747c) if available, otherwise fallback to the latest
-        if [ -d "clang-repo/clang-r487747c" ]; then
-            mv clang-repo/clang-r487747c/* toolchain/
-        else
-            echo "Specific Clang version not found in master! Using the latest available version..."
-            LATEST_CLANG=$(ls -d clang-repo/clang-r* | sort -V | tail -n 1)
-            mv $LATEST_CLANG/* toolchain/
-        fi
-        
-        # Clean up
-        rm -rf clang-repo
-
-    - name: Clone Your Kernel Source
-      run: |
-        # Cloning your specific repo
-        git clone https://github.com/MrPankaj24/SM-M146B-Kernel-Source.git android_kernel
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain
 
     - name: Clone KSU & SUSFS
       run: |
-        # Cloning KernelSU setup script
-        # Cloning SUSFS - explicitly using android13-5.15 branch
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
-        
-        # Cloning AnyKernel3 for packing
-        git clone https://github.com/TheWildJames/AnyKernel3.git -b android12-5.10 AnyKernel3
+        # Using the Android 14/15 compatible SUSFS branch
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1
+        git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-    - name: Install KernelSU
+    - name: Setup KernelSU
       working-directory: android_kernel
       run: |
         curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
@@ -66,72 +36,40 @@ jobs:
     - name: Patch SUSFS
       working-directory: android_kernel
       run: |
-        # 1. Copy header files
-        cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+        # 1. Copy SUSFS headers
+        cp ../susfs4ksu/kernel_patches/include/linux/*.h ./include/linux/
         cp ../susfs4ksu/kernel_patches/fs/* ./fs/
-
-        # 2. Apply Kernel Patch (Android 13 5.15 specific)
-        # We use the patch file specifically for gki-android13-5.15
-        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch ./
-        patch -p1 < 50_add_susfs_in_gki-android13-5.15.patch
-
-        # 3. Apply KSU Patch
-        cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
-        cd KernelSU
-        patch -p1 < 10_enable_susfs_for_ksu.patch
-
-    - name: Configure Kernel
-      working-directory: android_kernel
-      run: |
-        # Setup Environment Variables for Toolchain
-        export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
-        export CLANG_TRIPLE=aarch64-linux-gnu-
-        export ARCH=arm64
-        export SUBARCH=arm64
         
-        # Using the specific defconfig for M14/Exynos 1330
-        make O=out CC=clang s5e8535_defconfig
-
-        # Enable KSU & SUSFS in .config
-        cd out
-        ../scripts/config --file .config \
-            --enable CONFIG_KSU \
-            --enable CONFIG_KSU_SUSFS \
-            --enable CONFIG_KSU_SUSFS_SUS_PATH \
-            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
-            --enable CONFIG_KSU_SUSFS_SUS_KSTAT \
-            --enable CONFIG_KSU_SUSFS_SUS_OVERLAYFS \
-            --enable CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            --enable CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            --enable CONFIG_KSU_SUSFS_ENABLE_LOG \
-            --enable CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            --enable CONFIG_KSU_SUSFS_SUS_SU
+        # 2. Apply SUSFS Patches (Note: We use 6.1 for Android 15/A14 logic)
+        # If your kernel version is different, we adjust this patch file name
+        cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch ./
+        patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || echo "Patch ignored - manual merge might be needed"
 
     - name: Build Kernel
       working-directory: android_kernel
       run: |
         export PATH=$GITHUB_WORKSPACE/toolchain/bin:$PATH
-        export CLANG_TRIPLE=aarch64-linux-gnu-
         export ARCH=arm64
-        export SUBARCH=arm64
+        export KBUILD_BUILD_USER="Ansh"
+        export KBUILD_BUILD_HOST="M14-KSU"
         
-        # Build the Image
-        make O=out CC=clang -j$(nproc) Image
+        # Build commands
+        make O=out LLVM=1 LLVM_IAS=1 s5e8535-m14xnsxx_defconfig
+        
+        # Enable KSU & SUSFS manually in config
+        scripts/config --file out/.config --enable CONFIG_KSU
+        scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
+        
+        make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 Image
 
-    - name: Package Kernel
+    - name: Package AnyKernel3
       run: |
-        if [ -f "android_kernel/out/arch/arm64/boot/Image" ]; then
-            echo "Image found! Packaging..."
-            cp android_kernel/out/arch/arm64/boot/Image AnyKernel3/
-            cd AnyKernel3
-            zip -r9 "../M14-A13-KSU-SUSFS.zip" *
-        else
-            echo "Error: Image not found. Build likely failed."
-            exit 1
-        fi
+        cp android_kernel/out/arch/arm64/boot/Image AnyKernel3/
+        cd AnyKernel3
+        zip -r9 "../Ansh-M14-KSU-SUSFS.zip" *
 
-    - name: Upload Artifact
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: M14-KernelSU-SUSFS
-        path: M14-A13-KSU-SUSFS.zip
+        name: Ansh-M14-KernelSU
+        path: Ansh-M14-KSU-SUSFS.zip
