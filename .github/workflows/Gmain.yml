@@ -20,7 +20,7 @@ jobs:
       - name: 📥 Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: MrPankaj24/SM-M146B-Kernel-Source
+          repository: ansh-m14x/SM-M146B-Kernel-Source
           ref: main
           fetch-depth: 1
 
@@ -237,7 +237,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-s5e8535-m14-android15
+          name: Ansh-m14x-android15
           path: AnyKernel3-M14-Bootable.zip
           retention-days: 30
 
